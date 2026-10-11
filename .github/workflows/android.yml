@@ -2,8 +2,7 @@ name: Build ClassicTube APK
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -34,65 +33,107 @@ jobs:
             "platforms;android-33" \
             "build-tools;33.0.2"
 
-      - name: Set up compatible Gradle
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '7.6.4'
 
-      - name: Extract ClassicTube project
+      - name: Extract and locate project
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*classictube*.zip' -print -quit)"
+          ZIP_FILE="./ClassicTube Fullscreen Upd.zip"
 
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "::error::ClassicTube ZIP not found in the repository root."
-            echo "Upload ClassicTube-Android-Starter.zip to the repository root."
-            exit 1
+          if [[ ! -f "$ZIP_FILE" ]]; then
+            matches=()
+            while IFS= read -r -d '' file; do
+              matches+=("$file")
+            done < <(
+              find . -maxdepth 1 -type f \
+                -iname '*classictube*.zip' -print0
+            )
+
+            if [[ ${#matches[@]} -ne 1 ]]; then
+              echo "::error::Expected one ClassicTube ZIP."
+              printf 'Found: %s\n' "${matches[@]:-none}"
+              echo "Keep only the current project ZIP in the repository root."
+              exit 1
+            fi
+
+            ZIP_FILE="${matches[0]}"
           fi
 
-          echo "Found project archive: $ZIP_FILE"
+          echo "Using archive: $ZIP_FILE"
 
           rm -rf source
           mkdir -p source
-
           unzip -q "$ZIP_FILE" -d source
 
-          if [[ ! -f source/ClassicTube/settings.gradle ]] ||
-             [[ ! -f source/ClassicTube/build.gradle ]] ||
-             [[ ! -f source/ClassicTube/app/build.gradle ]]; then
-            echo "::error::The ZIP does not have the expected project structure."
-            find source -maxdepth 4 -type f -print | sort
+          PROJECT_ROOT=""
+
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              */settings.gradle)
+                root="${file%/settings.gradle}"
+                ;;
+              */settings.gradle.kts)
+                root="${file%/settings.gradle.kts}"
+                ;;
+              *)
+                continue
+                ;;
+            esac
+
+            if [[ -f "$root/app/build.gradle" ||
+                  -f "$root/app/build.gradle.kts" ]]; then
+              if [[ -f "$root/build.gradle" ||
+                    -f "$root/build.gradle.kts" ]]; then
+                PROJECT_ROOT="$root"
+                break
+              fi
+            fi
+          done < <(
+            find source -type f \
+              \( -name settings.gradle \
+                 -o -name settings.gradle.kts \) -print0
+          )
+
+          if [[ -z "$PROJECT_ROOT" ]]; then
+            echo "::error::Could not locate a valid Android Gradle project."
+            echo "Gradle files found:"
+            find source -type f \
+              \( -name settings.gradle \
+                 -o -name build.gradle \
+                 -o -name build.gradle.kts \
+                 -o -name settings.gradle.kts \) -print
             exit 1
           fi
 
-          echo "Project files verified successfully."
+          echo "Found project root: $PROJECT_ROOT"
+          echo "PROJECT_DIR=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
       - name: Build APK
-        working-directory: source/ClassicTube
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          gradle --version
           gradle --no-daemon --stacktrace assembleDebug
 
-      - name: Verify generated APK
+      - name: Verify APK
         shell: bash
         run: |
-          APK="source/ClassicTube/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [[ ! -s "$APK" ]]; then
-            echo "::error::The APK was not generated."
+            echo "::error::APK was not generated."
             exit 1
           fi
 
-          echo "APK generated successfully:"
           ls -lh "$APK"
-          file "$APK"
 
-      - name: Publish downloadable APK
+      - name: Publish APK
         uses: actions/upload-artifact@v7
         with:
           name: app-debug.apk
-          path: source/ClassicTube/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           archive: false
